@@ -1,0 +1,28 @@
+{
+  "id": "usage-bar",
+  "apiVersion": 3,
+  "name": "用量与上下文状态栏",
+  "version": "1.0.0",
+  "description": "在对话顶栏右侧显示各已登录套餐的 5h/7d 剩余额度，在输入框下方显示当前对话上下文进度与当前套餐额度，悬停查看重置时间，点击打开用量页。",
+  "author": "skyqingname",
+  "repository": "https://github.com/skyqingname/t3x-usage-bar",
+  "repositoryId": 1473860009,
+  "locales": {
+    "en": {
+      "name": "Usage & Context Bar",
+      "description": "Shows signed-in plan 5h/7d remaining usage in the thread header and context window + active plan usage under the composer."
+    }
+  },
+  "permissions": [
+    "ui"
+  ],
+  "entries": {
+    "web": [
+      "logic.js",
+      "web.js"
+    ],
+    "styles": [
+      "styles.css"
+    ]
+  }
+}
