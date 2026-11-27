@@ -154,11 +154,14 @@ function extractAccounts(providers) {
   return result;
 }
 
-function findActiveWindows(providerInstanceId, providers) {
+function findActiveWindows(providerInstanceId, providers, model) {
   if (!providerInstanceId || !Array.isArray(providers)) return null;
   const match = providers.find((p) => p && p.instanceId === providerInstanceId);
   const windows = match?.usageLimits?.windows;
-  return Array.isArray(windows) && windows.length > 0 ? windows : null;
+  if (!Array.isArray(windows) || windows.length === 0) return null;
+  // 带 modelIds 的窗口只挡列出的模型（比如 Antigravity 的 Gemini 和 Claude / GPT 各有额度）：只看挡得住当前模型的
+  const limiting = model ? windows.filter((w) => !Array.isArray(w?.modelIds) || w.modelIds.includes(model)) : windows;
+  return limiting.length > 0 ? limiting : windows;
 }
 
 function normalizeContext(context) {

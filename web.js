@@ -120,14 +120,19 @@ function createTooltipManager() {
     });
   }
 
-  return { hide, attach };
+  /** 提示的锚点在 root 里面时收起（这一处要重建或移除了）；别处的提示不动。 */
+  function hideIn(root) {
+    for (let n = activeAnchor; n; n = n.parentElement) if (n === root) return hide();
+  }
+
+  return { hide, hideIn, attach };
 }
 
-function findHeaderContainer() {
+function findHeaderNav() {
   const navs = document.querySelectorAll('nav:has([data-slot="workspace-breadcrumb-text"])');
   for (const nav of navs) {
-    if (!nav.closest("[data-side-chat-pane]")) {
-      return nav.parentElement;
+    if (!nav.closest("[data-side-chat-pane]") && nav.parentElement) {
+      return nav;
     }
   }
   return null;
@@ -143,12 +148,24 @@ function createController() {
   const tooltip = createTooltipManager();
   let headerNode = null;
   let composerNode = null;
+  // 上次画进去的内容；一样就不重建（重建会换掉鼠标下的按钮，还会触发 MutationObserver）
+  let headerSig = null;
+  let composerSig = null;
+  // 这一处该不该显示：只有该显示的节点被 T3 重渲染挪走了才需要重画
+  let wantHeader = false;
+  let wantComposer = false;
+  // 挂在谁旁边：T3 把它们挪走或换掉时（我们的节点还挂在原处）也要跟过去
+  let headerNav = null;
+  let composerShell = null;
   let latestState = null;
   let disposed = false;
   let scheduled = false;
 
   function removeNodes() {
     tooltip.hide();
+    wantHeader = wantComposer = false;
+    headerSig = composerSig = null;
+    headerNav = composerShell = null;
     if (headerNode) {
       headerNode.remove();
       headerNode = null;
@@ -159,13 +176,17 @@ function createController() {
     }
   }
 
-  function renderHeader(state, prefs, now, isZh) {
+  function renderHeader(state, prefs, isZh) {
     const accounts = prefs.showHeader ? extractAccounts(state.providers) : [];
-    const container = accounts.length > 0 ? findHeaderContainer() : null;
-    if (!container || accounts.length === 0) {
+    wantHeader = accounts.length > 0;
+    headerNav = wantHeader ? findHeaderNav() : null;
+    const container = headerNav?.parentElement ?? null;
+    if (!container) {
       if (headerNode) {
+        tooltip.hideIn(headerNode);
         headerNode.remove();
         headerNode = null;
+        headerSig = null;
       }
       return;
     }
@@ -178,6 +199,10 @@ function createController() {
       container.appendChild(headerNode);
     }
 
+    const sig = JSON.stringify([isZh, accounts]);
+    if (sig === headerSig) return;
+    headerSig = sig;
+    tooltip.hideIn(headerNode);
     headerNode.textContent = "";
     for (const account of accounts) {
       const btn = el("button", "t3x-ub-pill");
@@ -192,7 +217,7 @@ function createController() {
       tooltip.attach(btn, "bottom", (pop) => {
         const heading = account.plan ? `${account.title} · ${account.plan}` : account.title;
         pop.appendChild(el("div", "t3x-ub-tip-title", heading));
-        pop.appendChild(buildWindowTooltipLines(account.windows, now, isZh));
+        pop.appendChild(buildWindowTooltipLines(account.windows, Date.now(), isZh));
         pop.appendChild(
           el("div", "t3x-ub-tip-hint", isZh ? "点击打开用量页" : "Click to open usage"),
         );
@@ -201,18 +226,22 @@ function createController() {
     }
   }
 
-  function renderComposer(state, prefs, now, isZh) {
+  function renderComposer(state, prefs, isZh) {
     const ctx = prefs.showComposer && prefs.showContext ? normalizeContext(state.context) : null;
     const windows =
       prefs.showComposer && prefs.showActiveUsage
-        ? findActiveWindows(state.providerInstanceId, state.providers)
+        ? findActiveWindows(state.providerInstanceId, state.providers, state.model)
         : null;
-    const shell = ctx || windows ? findComposerShell() : null;
+    wantComposer = Boolean(ctx || windows);
+    const shell = wantComposer ? findComposerShell() : null;
+    composerShell = shell?.parentElement ? shell : null;
 
-    if (!shell || !shell.parentElement || (!ctx && !windows)) {
+    if (!composerShell) {
       if (composerNode) {
+        tooltip.hideIn(composerNode);
         composerNode.remove();
         composerNode = null;
+        composerSig = null;
       }
       return;
     }
@@ -225,6 +254,10 @@ function createController() {
       shell.insertAdjacentElement("afterend", composerNode);
     }
 
+    const sig = JSON.stringify([isZh, ctx, windows]);
+    if (sig === composerSig) return;
+    composerSig = sig;
+    tooltip.hideIn(composerNode);
     composerNode.textContent = "";
 
     if (ctx) {
@@ -289,7 +322,7 @@ function createController() {
         openUsagePage();
       });
       tooltip.attach(btn, "top", (pop) => {
-        pop.appendChild(buildWindowTooltipLines(windows, now, isZh));
+        pop.appendChild(buildWindowTooltipLines(windows, Date.now(), isZh));
         pop.appendChild(
           el("div", "t3x-ub-tip-hint", isZh ? "点击打开用量页" : "Click to open usage"),
         );
@@ -306,10 +339,9 @@ function createController() {
       return;
     }
     const prefs = readPrefs();
-    const now = Date.now();
     const isZh = host.lang() === "zh";
-    renderHeader(latestState, prefs, now, isZh);
-    renderComposer(latestState, prefs, now, isZh);
+    renderHeader(latestState, prefs, isZh);
+    renderComposer(latestState, prefs, isZh);
   }
 
   function schedulePaint() {
@@ -318,17 +350,17 @@ function createController() {
     requestAnimationFrame(paint);
   }
 
+  // 该显示的节点不在页面上、或者没挨着它的锚点了（T3 重渲染把它或锚点挪走了，或者还没找到挂载位置）才补画。
+  // 只看自己记下的几个节点，不查 DOM；自己重建内容引起的变化不会走到这里，不然只显示一处时会每帧重画
+  const headerLost = () => !headerNode?.isConnected || !headerNav?.isConnected || headerNode.parentElement !== headerNav.parentElement;
+  const composerLost = () => !composerNode?.isConnected || !composerShell?.isConnected || composerNode.previousElementSibling !== composerShell;
   const observer = new MutationObserver(() => {
     if (!latestState || disposed) return;
-    const headerDetached = headerNode && !headerNode.isConnected;
-    const composerDetached = composerNode && !composerNode.isConnected;
-    if (headerDetached || composerDetached || !headerNode || !composerNode) {
+    if ((wantHeader && headerLost()) || (wantComposer && composerLost())) {
       schedulePaint();
     }
   });
   observer.observe(document.body, { childList: true, subtree: true });
-
-  const timer = setInterval(schedulePaint, 60000);
 
   return {
     update(state) {
@@ -345,7 +377,6 @@ function createController() {
     dispose() {
       disposed = true;
       observer.disconnect();
-      clearInterval(timer);
       removeNodes();
     },
   };
@@ -359,11 +390,11 @@ for (const key of Object.keys(DEFAULT_PREFS)) {
 
 function UsageBarOverlay(props) {
   const lang = host.useLang();
-  const { embedded, context, providerInstanceId, providers, threadKey } = props;
+  const { embedded, context, providerInstanceId, providers, threadKey, model } = props;
   React.useEffect(() => {
     if (embedded) return;
-    controller.update({ context, providerInstanceId, providers, threadKey, lang });
-  }, [embedded, context, providerInstanceId, providers, threadKey, lang]);
+    controller.update({ context, providerInstanceId, providers, threadKey, model, lang });
+  }, [embedded, context, providerInstanceId, providers, threadKey, model, lang]);
 
   React.useEffect(() => {
     if (embedded) return;
@@ -398,11 +429,11 @@ function UsageBarSettings({ ui }) {
           "在对话顶栏右侧显示当前环境各已登录套餐的 5h / 7d 剩余额度。",
           "Show 5h / 7d remaining quota for each signed-in plan in the thread header.",
         ),
+        control: h(ui.Switch, {
+          checked: showHeader,
+          onCheckedChange: (checked) => host.storage.set("showHeader", !!checked),
+        }),
       },
-      h(ui.Switch, {
-        checked: showHeader,
-        onCheckedChange: (checked) => host.storage.set("showHeader", !!checked),
-      }),
     ),
     h(
       ui.Row,
@@ -412,11 +443,11 @@ function UsageBarSettings({ ui }) {
           "在主输入框下方显示上下文用量与当前套餐剩余额度。",
           "Show context window progress and active plan usage under the main composer.",
         ),
+        control: h(ui.Switch, {
+          checked: showComposer,
+          onCheckedChange: (checked) => host.storage.set("showComposer", !!checked),
+        }),
       },
-      h(ui.Switch, {
-        checked: showComposer,
-        onCheckedChange: (checked) => host.storage.set("showComposer", !!checked),
-      }),
     ),
     showComposer
       ? h(
@@ -427,11 +458,11 @@ function UsageBarSettings({ ui }) {
               "在输入框下方左侧显示已用 token、上限和进度细条。",
               "Show used tokens, context limit, and progress bar on the left.",
             ),
+            control: h(ui.Switch, {
+              checked: showContext,
+              onCheckedChange: (checked) => host.storage.set("showContext", !!checked),
+            }),
           },
-          h(ui.Switch, {
-            checked: showContext,
-            onCheckedChange: (checked) => host.storage.set("showContext", !!checked),
-          }),
         )
       : null,
     showComposer
@@ -443,11 +474,11 @@ function UsageBarSettings({ ui }) {
               "在输入框下方右侧显示当前对话所用套餐的 5h / 7d 剩余额度。",
               "Show 5h / 7d remaining quota for the active thread plan on the right.",
             ),
+            control: h(ui.Switch, {
+              checked: showActiveUsage,
+              onCheckedChange: (checked) => host.storage.set("showActiveUsage", !!checked),
+            }),
           },
-          h(ui.Switch, {
-            checked: showActiveUsage,
-            onCheckedChange: (checked) => host.storage.set("showActiveUsage", !!checked),
-          }),
         )
       : null,
   );
